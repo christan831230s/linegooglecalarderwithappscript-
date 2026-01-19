@@ -1,0 +1,407 @@
+
+// ==========================================
+// Open Source Appointment Bot (Lite Version)
+// 教學版 - 附帶設定檢查功能
+// ==========================================
+
+// 🟢 學生作業區 (填寫完畢後請按「儲存」)
+
+// 1. 請填入 LINE Channel Access Token
+var CHANNEL_ACCESS_TOKEN = 'YOUR_CHANNEL_ACCESS_TOKEN_HERE'; 
+
+// 2. 請填入 Google Sheet ID (試算表網址 /d/ 到 /edit 中間的亂碼)
+var SHEET_ID = 'YOUR_GOOGLE_SHEET_ID_HERE'; 
+
+// 3. 店長的 LINE User ID (第一次部署後，對機器人輸入「查詢ID」可取得)
+var MANAGER_USER_ID = 'YOUR_MANAGER_USER_ID_HERE'; 
+
+// 4. 請填入 Web App URL (點擊「部署」->「新增部署」後取得的網址)
+var WEB_APP_URL = 'YOUR_WEB_APP_URL_HERE'; 
+
+// ==========================================
+// 進階設定 (通常不用改)
+var CALENDAR_ID = 'primary'; 
+var SHEET_TAB_NAME = 'Member_DB';
+// ==========================================
+
+function onOpen() {
+  SpreadsheetApp.getUi().createMenu('🤖 機器人設定')
+      .addItem('0. 檢查設定狀態 (教學用)', 'checkSettings')
+      .addSeparator()
+      .addItem('1. 初始化資料表', 'initSheet')
+      .addItem('2. 啟動日曆監控 (Webhook)', 'setupCalendarWebhook')
+      .addItem('3. 測試發送日報', 'runDailyReport')
+      .addItem('4. 測試明日預約提醒', 'runPreArrivalReminder')
+      .addToUi();
+}
+
+// 🎓 教學輔助功能：檢查學生是否忘記填資料
+function checkSettings() {
+  var ui = SpreadsheetApp.getUi();
+  var errors = [];
+  
+  if (!CHANNEL_ACCESS_TOKEN || CHANNEL_ACCESS_TOKEN.indexOf('YOUR_') > -1) {
+    errors.push("❌ 尚未填寫 LINE Channel Access Token");
+  }
+  if (!SHEET_ID || SHEET_ID.indexOf('YOUR_') > -1) {
+    errors.push("❌ 尚未填寫 Google Sheet ID");
+  }
+  if (!WEB_APP_URL || WEB_APP_URL.indexOf('YOUR_') > -1) {
+    errors.push("⚠️ 尚未填寫 Web App URL (若尚未部署，請忽視此項)");
+  }
+  
+  if (errors.length > 0) {
+    ui.alert("設定檢查未通過：\n\n" + errors.join("\n") + "\n\n請修改程式碼上方的變數後，按「儲存」再試一次。");
+  } else {
+    ui.alert("✅ 設定看起來都填好了！\n\n接下來請依序執行：\n1. 初始化資料表\n2. 啟動日曆監控\n\n(記得要授權喔！)");
+  }
+}
+
+function initSheet() {
+  var ss = SpreadsheetApp.openById(SHEET_ID);
+  var sheet = ss.getSheetByName(SHEET_TAB_NAME);
+  if (!sheet) {
+    sheet = ss.insertSheet(SHEET_TAB_NAME);
+    sheet.appendRow(['UserID', 'Phone', 'Name', 'CreatedAt']);
+    sheet.setFrozenRows(1);
+    SpreadsheetApp.getUi().alert('✅ 資料表初始化完成！');
+  } else {
+    SpreadsheetApp.getUi().alert('⚠️ 資料表已存在，不需重複執行。');
+  }
+}
+
+// ==========================================
+// 2. 核心處理 (Webhook Handler)
+// ==========================================
+
+function doPost(e) {
+  var lock = LockService.getScriptLock();
+  if (!lock.tryLock(5000)) return ContentService.createTextOutput("Busy");
+
+  try {
+    // A. 處理 Google Calendar 通知
+    if (e.parameter && e.parameter.source === 'calendar') {
+      handleCalendarWebhook();
+      return ContentService.createTextOutput("200 OK");
+    }
+
+    // B. 處理 LINE 訊息
+    if (!e || !e.postData) return;
+    var msgObj = JSON.parse(e.postData.contents);
+    var event = msgObj.events[0];
+    if (!event) return;
+
+    var replyToken = event.replyToken;
+    var userId = event.source.userId;
+    var userMsg = (event.type === 'message' && event.message.type === 'text') ? event.message.text.trim() : '';
+
+    // 🧠 智慧綁定判斷：如果是手機號碼，區分是「新綁定」、「重複輸入」還是「更新號碼」
+    if (/^09\d{8}$/.test(userMsg)) {
+      var resultMsg = processPhoneBinding(userId, userMsg);
+      replyMessage(replyToken, resultMsg);
+    } else if (userMsg === '查詢ID') {
+      replyMessage(replyToken, "您的 UserID 是：\n" + userId + "\n\n(請將此 ID 填入程式碼的 MANAGER_USER_ID 以接收管理員通知)");
+    } else {
+      if (userId !== MANAGER_USER_ID) {
+        replyMessage(replyToken, "👋 您好，請直接輸入您的「手機號碼」進行綁定 (例如：0912345678)。");
+      }
+    }
+
+  } catch (err) {
+    console.error("doPost Error: " + err.toString());
+  } finally {
+    lock.releaseLock();
+  }
+}
+
+// ==========================================
+// 3. 日曆監控與通知 (Calendar Watcher)
+// ==========================================
+
+function setupCalendarWebhook() {
+  if (WEB_APP_URL.indexOf('YOUR_') > -1) {
+    SpreadsheetApp.getUi().alert("❌ 錯誤：請先將部署後的 Web App URL 填入程式碼上方，才能啟動監控。");
+    return;
+  }
+
+  var triggers = ScriptApp.getProjectTriggers();
+  for (var i = 0; i < triggers.length; i++) {
+    ScriptApp.deleteTrigger(triggers[i]);
+  }
+  
+  // 原有排程
+  ScriptApp.newTrigger('renewCalendarWebhook').timeBased().everyDays(1).atHour(5).create();
+  ScriptApp.newTrigger('runDailyReport').timeBased().everyDays(1).atHour(8).create(); 
+  
+  // 🆕 新增：每天晚上 6 點執行「明日預約提醒」
+  ScriptApp.newTrigger('runPreArrivalReminder').timeBased().everyDays(1).atHour(18).create();
+
+  try {
+    var now = new Date();
+    var pageToken = null;
+    var nextSyncToken = null;
+    
+    do {
+      var options = {
+        timeMin: now.toISOString(),
+        maxResults: 100 
+      };
+      if (pageToken) options.pageToken = pageToken;
+      var list = Calendar.Events.list(CALENDAR_ID, options);
+      if (list.nextSyncToken) {
+        nextSyncToken = list.nextSyncToken;
+        break; 
+      }
+      pageToken = list.nextPageToken;
+    } while (pageToken);
+
+    if (nextSyncToken) {
+      PropertiesService.getScriptProperties().setProperty("CAL_SYNC_TOKEN", nextSyncToken);
+      console.log("✅ Initial Sync Token Set: " + nextSyncToken);
+    } 
+
+  } catch (e) {
+    console.error("Initial Sync Failed: " + e);
+    SpreadsheetApp.getUi().alert('❌ 初始化失敗 (Sync Token Error)');
+    return;
+  }
+
+  var channelId = "bot-calendar-watch-" + new Date().getTime();
+  var resource = {
+    id: channelId,
+    type: "web_hook",
+    address: WEB_APP_URL + "?source=calendar"
+  };
+
+  try {
+    var response = Calendar.Events.watch(resource, CALENDAR_ID);
+    console.log("Webhook Resource ID: " + response.resourceId);
+    SpreadsheetApp.getUi().alert('✅ 監控已啟動！\n(已設定每日 08:00 發日報、18:00 發明日提醒)');
+  } catch (e) {
+    console.error(e);
+    SpreadsheetApp.getUi().alert('❌ 啟動失敗: ' + e.message + '\n\n請檢查 Web App URL 是否正確，並確認已部署為「任何人」可讀取。');
+  }
+}
+
+function renewCalendarWebhook() {
+  var channelId = "bot-calendar-watch-" + new Date().getTime();
+  var resource = { id: channelId, type: "web_hook", address: WEB_APP_URL + "?source=calendar" };
+  try { Calendar.Events.watch(resource, CALENDAR_ID); } catch(e) {}
+}
+
+function handleCalendarWebhook() {
+  var props = PropertiesService.getScriptProperties();
+  var syncToken = props.getProperty('CAL_SYNC_TOKEN');
+  var options = { maxResults: 50 };
+  
+  if (syncToken) {
+    options.syncToken = syncToken;
+  } else {
+    var safetyTime = new Date();
+    safetyTime.setMinutes(safetyTime.getMinutes() - 5);
+    options.timeMin = safetyTime.toISOString();
+  }
+  
+  try {
+    var eventList = Calendar.Events.list(CALENDAR_ID, options);
+    if (eventList.nextSyncToken) {
+      props.setProperty('CAL_SYNC_TOKEN', eventList.nextSyncToken);
+    }
+
+    if (!eventList.items || eventList.items.length === 0) return;
+
+    var memberMap = getMemberMap(); 
+
+    for (var i = 0; i < eventList.items.length; i++) {
+      var event = eventList.items[i];
+      if (event.status === 'confirmed') {
+        processEventNotification(event, memberMap);
+      }
+    }
+  } catch (e) {
+    if (e.message.indexOf('Sync token') > -1) {
+      props.deleteProperty('CAL_SYNC_TOKEN'); 
+    }
+    console.error("Calendar Sync Error: " + e.toString());
+  }
+}
+
+function processEventNotification(event, memberMap) {
+  var created = new Date(event.created);
+  var updated = new Date(event.updated);
+  var now = new Date();
+
+  var timeDiff = (now.getTime() - updated.getTime()) / 60000; 
+  if (timeDiff > 5) return; 
+  
+  var isNew = (Math.abs(updated - created) < 60000);
+  var title = event.summary || "未命名預約";
+  var desc = event.description || "";
+  var startTime = new Date(event.start.dateTime || event.start.date);
+  var timeStr = Utilities.formatDate(startTime, "GMT+8", "yyyy/MM/dd HH:mm");
+  var phone = extractPhoneNumber(title + " " + desc);
+  
+  var managerMsg = (isNew ? "🆕 新增預約通知" : "🔄 預約變更通知") + "\n\n" +
+                   "📅 時間：" + timeStr + "\n" +
+                   "👤 顧客：" + title + "\n" +
+                   "📞 電話：" + (phone || "未偵測到");
+  
+  pushMessage(MANAGER_USER_ID, managerMsg);
+  
+  if (phone && memberMap[phone]) {
+    var userMsg = "✅ 預約確認通知\n\n" +
+                  "親愛的顧客您好，我們已收到您的預約：\n" +
+                  "📅 時間：" + timeStr + "\n" +
+                  "📌項目：" + title + "\n\n" +
+                  "期待您的光臨！";
+    pushMessage(memberMap[phone], userMsg);
+  }
+}
+
+// ==========================================
+// 4. 定時報告與提醒 (Reports & Reminders)
+// ==========================================
+
+function runDailyReport() {
+  if (!MANAGER_USER_ID || MANAGER_USER_ID.indexOf('YOUR_') > -1) {
+    console.log("尚未設定 MANAGER_USER_ID，跳過日報");
+    return;
+  }
+
+  var today = new Date();
+  var events = CalendarApp.getCalendarById(CALENDAR_ID).getEventsForDay(today);
+  var dateStr = Utilities.formatDate(today, "GMT+8", "yyyy/MM/dd");
+  var report = "📊 店長日報 [" + dateStr + "]\n";
+  
+  if (events.length === 0) {
+    report += "\n🍵 今日無預約行程。";
+  } else {
+    report += "\n今日共有 " + events.length + " 組預約：\n";
+    for (var i = 0; i < events.length; i++) {
+      var evt = events[i];
+      var time = Utilities.formatDate(evt.getStartTime(), "GMT+8", "HH:mm");
+      var title = evt.getTitle();
+      report += "\n" + (i+1) + ". " + time + " " + title;
+    }
+  }
+  pushMessage(MANAGER_USER_ID, report);
+}
+
+// 🆕 新增：明日預約提醒
+function runPreArrivalReminder() {
+  var today = new Date();
+  var tomorrow = new Date(today);
+  tomorrow.setDate(today.getDate() + 1); // 取得明天的日期
+  
+  var events = CalendarApp.getCalendarById(CALENDAR_ID).getEventsForDay(tomorrow);
+  
+  if (events.length === 0) return; // 明天沒事就休息
+  
+  var memberMap = getMemberMap();
+  var count = 0;
+
+  for (var i = 0; i < events.length; i++) {
+    var evt = events[i];
+    var title = evt.getTitle();
+    var desc = evt.getDescription();
+    
+    // 從標題或備註抓電話
+    var phone = extractPhoneNumber(title + " " + desc);
+    
+    if (phone && memberMap[phone]) {
+      var timeStr = Utilities.formatDate(evt.getStartTime(), "GMT+8", "HH:mm");
+      var userMsg = "🔔 明日預約提醒\n\n" +
+                    "親愛的顧客您好，提醒您明天有預約喔！\n" + 
+                    "📅 時間：" + timeStr + "\n" +
+                    "📌 項目：" + title + "\n\n" +
+                    "如果有任何變動，請提前告知我們，謝謝！";
+      
+      pushMessage(memberMap[phone], userMsg);
+      count++;
+    }
+  }
+  console.log("已發送 " + count + " 則明日預約提醒");
+}
+
+// ==========================================
+// 工具函式
+// ==========================================
+
+// 🔄 處理會員綁定 (區分新舊用戶)
+function processPhoneBinding(userId, phone) {
+  var ss = SpreadsheetApp.openById(SHEET_ID);
+  var sheet = ss.getSheetByName(SHEET_TAB_NAME);
+  var data = sheet.getDataRange().getValues();
+  
+  for (var i = 1; i < data.length; i++) {
+    if (String(data[i][0]) === userId) {
+      var oldPhone = String(data[i][1]).replace(/['\s-]/g, '');
+      
+      if (oldPhone === phone) {
+        return "ℹ️ 您已經綁定過這個號碼 (" + phone + ") 囉，不需要重複設定。";
+      } else {
+        sheet.getRange(i + 1, 2).setValue("'" + phone);
+        return "🔄 更新成功！\n\n已將您的綁定電話修改為：" + phone;
+      }
+    }
+  }
+  
+  var time = Utilities.formatDate(new Date(), "GMT+8", "yyyy/MM/dd HH:mm");
+  sheet.appendRow([userId, "'" + phone, 'User', time]);
+  return "✅ 綁定成功！\n\n您的電話：" + phone + "\n\n當您在 Google 日曆上有預約時，系統將會自動發送提醒給您。";
+}
+
+function getMemberMap() {
+  var ss = SpreadsheetApp.openById(SHEET_ID);
+  var sheet = ss.getSheetByName(SHEET_TAB_NAME);
+  var data = sheet.getDataRange().getValues();
+  var map = {};
+  for (var i = 1; i < data.length; i++) {
+    var uid = data[i][0];
+    var phone = String(data[i][1]).replace(/['\s-]/g, '');
+    if (uid && phone) map[phone] = uid;
+  }
+  return map;
+}
+
+function extractPhoneNumber(text) {
+  if (!text) return null;
+  var match = text.replace(/[- ]/g, '').match(/(09\d{8})/);
+  return match ? match[1] : null;
+}
+
+function pushMessage(userId, text) {
+  try {
+    UrlFetchApp.fetch('https://api.line.me/v2/bot/message/push', {
+      'headers': {
+        'Content-Type': 'application/json',
+        'Authorization': 'Bearer ' + CHANNEL_ACCESS_TOKEN
+      },
+      'method': 'post',
+      'payload': JSON.stringify({
+        'to': userId,
+        'messages': [{ 'type': 'text', 'text': text }]
+      })
+    });
+  } catch (e) {
+    console.error("Push Error: " + e.message);
+  }
+}
+
+function replyMessage(replyToken, text) {
+  try {
+    UrlFetchApp.fetch('https://api.line.me/v2/bot/message/reply', {
+      'headers': {
+        'Content-Type': 'application/json',
+        'Authorization': 'Bearer ' + CHANNEL_ACCESS_TOKEN
+      },
+      'method': 'post',
+      'payload': JSON.stringify({
+        'replyToken': replyToken,
+        'messages': [{ 'type': 'text', 'text': text }]
+      })
+    });
+  } catch (e) {
+    console.error("Reply Error: " + e.message);
+  }
+}

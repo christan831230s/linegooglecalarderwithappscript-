@@ -1,2 +1,101 @@
-# linegooglecalarderwithappscript-
-使用 Google calarder 預約功能 + Line通知 基於 Google app script 
+# 🤖 LINE 預約自動提醒機器人 (Open Source Appointment Bot)
+
+這是一個基於 **Google Apps Script (GAS)** 開發的輕量級預約管理機器人。不需要租用伺服器，利用 Google 日曆與 Google 試算表，即可達成 LINE 自動預約確認、行程提醒與店長日報功能。
+
+特別優化了**教學流程**，內建「設定檢查」功能，非常適合程式設計教學、工作坊或個人小型商家（驗光師、物理治療師、美甲、美睫、個人工作室）使用。
+
+![License](https://img.shields.io/badge/license-MIT-blue.svg) ![Google Apps Script](https://img.shields.io/badge/Built%20with-Google%20Apps%20Script-4285F4.svg)
+
+## ✨ 功能特色
+
+*   **👥 會員智慧綁定**：顧客在 LINE 輸入手機號碼即可綁定，支援重複輸入檢查與號碼更新。
+*   **📅 日曆雙向同步**：店長只需在 Google 日曆建立行程（填寫顧客電話），系統自動發送 LINE 確認訊息給顧客。
+*   **🔔 自動到店提醒**：
+    *   **預約當下**：發送確認通知。
+    *   **前一天 18:00**：自動發送明日行程提醒，降低顧客 No-show 放鳥的機率。
+*   **📊 店長每日日報**：每天早上 08:00 自動彙整當日預約列表，發送給管理員。
+*   **🎓 教學友善模式**：內建「機器人設定」選單，一鍵檢查 Token 與 URL 設定狀態，引導學生完成部署。
+
+---
+
+## 🛠️ 準備工作
+
+在開始之前，您需要準備：
+
+1.  **Google 帳號**：用於建立 Google Sheet 與 Script。
+2.  **LINE Official Account (LINE OA)**：請至 [LINE Developers Console](https://developers.line.biz/) 申請一個 Messaging API 頻道。
+    *   取得 `Channel Access Token` (長效)。
+    *   關閉「自動回應訊息」，開啟「Webhook」。
+
+---
+
+## 🚀 安裝與部署教學 (5分鐘快速上手)
+
+### 第一步：建立專案
+1. 建立一個新的 Google Sheet。
+2. 點擊上方選單 **「擴充功能」** -> **「Apps Script」**。
+3. 將 `1.txt` (或是本專案的程式碼) 完整複製貼上到編輯器中。
+
+### 第二步：填寫設定資料
+在程式碼最上方，填入您的環境變數：
+
+```javascript
+// 1. LINE Channel Access Token
+var CHANNEL_ACCESS_TOKEN = '您的_LINE_TOKEN'; 
+
+// 2. Google Sheet ID (網址 /d/ 到 /edit 中間的亂碼)
+var SHEET_ID = '您的_SHEET_ID'; 
+
+// 3. 店長 User ID (稍後可透過查詢取得，先留空或填入教學用的假資料)
+var MANAGER_USER_ID = ''; 
+
+// 4. Web App URL (先留空，等部署後再回來填)
+var WEB_APP_URL = '';
+
+### 第三步：部署程式 (關鍵！)
+點擊右上角 「部署」 -> 「新增部署」。
+齒輪選擇 「網頁應用程式 (Web App)」。
+執行身分：「我 (Me)」。
+誰可以存取：務必選擇「任何人 (Anyone)」 (這是最常錯的地方)。
+點擊部署，複製產生的 「網頁應用程式網址 (Web App URL)」。
+回到程式碼，將網址貼入 WEB_APP_URL 變數中，並按下 「儲存」。
+
+### 第四步：一鍵初始化 (教學模式)
+重新整理 Apps Script 網頁。
+您會看到選單列多了一個 「🤖 機器人設定」。
+點擊 「0. 檢查設定狀態」：系統會幫您檢查變數是否填寫正確。
+點擊 「1. 初始化資料表」：自動建立會員資料欄位。
+點擊 「2. 啟動日曆監控」：綁定 Google Calendar 並設定排程。
+
+### 第五步：LINE Webhook 設定
+回到 LINE Developers Console。
+找到 Webhook settings。
+將剛剛的 Web App URL 貼上，並點擊 Verify (若顯示 Success 即成功)。
+開啟 Use webhook 開關。
+
+📱 操作說明
+👤 顧客端 (使用者)
+加入機器人好友。
+輸入 「手機號碼」 (例如：0912345678)。
+機器人回覆「✅ 綁定成功」即完成。
+若輸入已綁定過的號碼，機器人會提示已綁定。
+若輸入新號碼，機器人會更新綁定資料。
+
+🏪 店長端 (管理員)
+取得管理員 ID：對機器人輸入 「查詢ID」，複製回傳的一串亂碼，填入程式碼的 MANAGER_USER_ID 並儲存。
+建立預約：
+打開 Google 日曆。
+建立一個新行程。
+關鍵：在「標題」或「說明」欄位中，填入顧客的電話號碼 (需包含 09...)。
+儲存後，顧客就會在 LINE 上收到確認通知。
+
+⏰ 自動排程說明
+系統已預設以下排程 (需執行「啟動日曆監控」後生效)：
+
+時間	功能	說明
+即時	預約確認	當日曆新增/修改行程時，立即通知顧客。
+05:00	更新監控	自動更新 Google Calendar 的監聽憑證 (Watch Renew)。
+08:00	店長日報	彙整當日所有行程，發送給店長。
+18:00	明日提醒	檢查明天的行程，發送提醒給顧客 (防呆防放鳥)。
+
+歡迎用於教學、修改或商業使用，請保留原作者版權聲明。
